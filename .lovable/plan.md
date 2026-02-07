@@ -1,205 +1,107 @@
 
-# 📧📲 Notification & Email System (SMTP Based) - Updated Plan
 
-## ✅ Already Completed
-- Database tables: `notification_preferences`, `push_subscriptions`, `email_logs` with RLS policies
-- Auto-create notification preferences trigger on profile creation
+# Push Notification System - Full Implementation
 
-## 🎯 Remaining Implementation
+## Current Status
 
-### Phase 1: Email Templates (13 Unique Designs)
-`src/lib/email-templates.ts` file එකක් create කරලා beautifully designed HTML templates 13ක් add කරනවා.
+**Already done:**
+- `push_subscriptions` table exists with RLS policies (endpoint, p256dh_key, auth_key, device_info, is_active)
+- `notification_preferences` table has push columns: `push_enabled`, `push_booking_updates`, `push_reminders`, `push_payment_updates`
+- PWA setup with `vite-plugin-pwa` (service worker via Workbox)
+- `send-email` edge function already working
 
-| # | Template | Recipient | Event |
-|---|----------|-----------|-------|
-| 1 | Welcome | Customer | Account create |
-| 2 | Booking Confirmed | Customer | New booking |
-| 3 | Booking Reminder | Customer | 24h before |
-| 4 | Booking Completed | Customer | Service done |
-| 5 | Booking Cancelled | Customer | Cancel |
-| 6 | Payment Received | Customer | Payment success |
-| 7 | Payment Refunded | Customer | Refund |
-| 8 | New Booking Alert | Salon Owner | New booking received |
-| 9 | Booking Cancelled Alert | Salon Owner | Customer cancel |
-| 10 | Daily Summary | Salon Owner | Daily report |
-| 11 | Payout Processed | Salon Owner | Payout done |
-| 12 | Account Frozen | Salon Owner | Credit limit exceeded |
-| 13 | Account Unfrozen | Salon Owner | Freeze removed |
-
-**Design:**
-- Brand: salonbooking.lk
-- Colors: Gold (#D4A574), Dark (#141516)
-- Responsive HTML email design
-- Each template unique icons/styling
+**Not yet built:**
+- `send-push` edge function
+- `usePushSubscription` hook (subscribe/unsubscribe)
+- `useNotificationPreferences` hook (load/save from DB)
+- Notifications.tsx database integration
+- Service worker push event listener
 
 ---
 
-### Phase 2: Send Email Edge Function (SMTP)
-`supabase/functions/send-email/index.ts` - Centralized email sender using SMTP
+## Implementation Steps
 
-**Features:**
-- Template selection based on `type` parameter
-- SMTP settings read from `system_settings` table (existing setup)
-- Auto-logging to `email_logs` table
-- Check user preferences before sending
+### Step 1: Service Worker Push Handler
+Add a custom service worker file that listens for `push` events and shows native notifications. The PWA plugin will inject this alongside the existing Workbox service worker.
 
+**New file:** `public/sw-push.js`
+- Listen for `push` event, parse payload, show notification with title/body/icon/URL
+- Listen for `notificationclick` to open the app at the right page
+
+### Step 2: Update PWA Config
+Modify `vite.config.ts` to import the custom push service worker alongside the auto-generated Workbox one using `importScripts`.
+
+### Step 3: Send Push Edge Function
+**New file:** `supabase/functions/send-push/index.ts`
+
+- Accept: `{ userId, title, body, url, data }`
+- Fetch user's `notification_preferences` to check if push is enabled
+- Fetch all active `push_subscriptions` for that user
+- Use the Web Push protocol (with VAPID keys stored as secrets) to send to each subscription endpoint
+- Remove invalid subscriptions (410 Gone responses)
+- Support batch sending (to multiple users)
+
+**Required secrets:** `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (email)
+
+### Step 4: Push Subscription Hook
+**New file:** `src/hooks/usePushSubscription.ts`
+
+- `subscribeToPush()`: Request notification permission, get PushSubscription from service worker, save endpoint + keys to `push_subscriptions` table
+- `unsubscribeFromPush()`: Unsubscribe from browser + deactivate in DB
+- `isSubscribed`: Check if current device has active subscription
+- Uses the VAPID public key (exposed via env variable `VITE_VAPID_PUBLIC_KEY`)
+
+### Step 5: Notification Preferences Hook
+**New file:** `src/hooks/useNotificationPreferences.ts`
+
+- Load preferences from `notification_preferences` table for current user
+- Update individual preference toggles
+- Auto-create default preferences if none exist
+
+### Step 6: Update Notifications Page
+**Modify:** `src/pages/Notifications.tsx`
+
+- Replace local `useState` with `useNotificationPreferences` hook
+- Map toggles to actual DB columns (email_booking_confirm, push_enabled, etc.)
+- Add push subscribe/unsubscribe button using `usePushSubscription`
+- Show permission status (granted/denied/default)
+- More granular controls matching DB columns
+
+---
+
+## Technical Details
+
+### VAPID Keys
+Web Push requires VAPID (Voluntary Application Server Identification) keys. These need to be generated once and stored as secrets:
+- `VAPID_PUBLIC_KEY` - shared with frontend (also add as `VITE_VAPID_PUBLIC_KEY` in .env)
+- `VAPID_PRIVATE_KEY` - only in edge function secrets
+- `VAPID_SUBJECT` - mailto: URL like `mailto:noreply@salonbooking.lk`
+
+### Push Payload Format
 ```text
-Request Body:
 {
-  "to": "customer@email.com",
-  "type": "booking_confirmed",
-  "data": {
-    "customerName": "John",
-    "salonName": "Glamour Salon",
-    "serviceName": "Haircut",
-    "date": "2024-02-10",
-    "time": "2:00 PM",
-    "total": 2500
-  }
+  "title": "Booking Confirmed",
+  "body": "Your appointment at Glamour Salon is confirmed for Feb 10 at 2:00 PM",
+  "icon": "/pwa-192x192.png",
+  "url": "/bookings"
 }
 ```
 
----
+### Preference Check Map for Push
+| Push Preference Column | Triggers |
+|---|---|
+| push_booking_updates | booking_confirmed, booking_cancelled, new_booking_alert |
+| push_reminders | booking_reminder |
+| push_payment_updates | payment_received, payout_processed |
 
-### Phase 3: Send Push Notification Edge Function
-`supabase/functions/send-push/index.ts` - Web Push notifications
+### Files Summary
 
-**Features:**
-- Web Push API (VAPID keys auto-generated)
-- Send to specific user or batch
-- Check push preferences before sending
-
----
-
-### Phase 4: Booking Reminders (Cron Job)
-`supabase/functions/booking-reminders/index.ts`
-
-**Logic:**
-- Run every hour
-- Find bookings 24h away
-- Send reminder email + push to customer
-- Mark as reminded (prevent duplicates)
-
----
-
-### Phase 5: Daily Summary (Cron Job)
-`supabase/functions/daily-summary/index.ts`
-
-**Logic:**
-- Run daily 6 AM
-- For each salon owner:
-  - Count today's bookings
-  - Calculate revenue
-  - Send summary email
-
----
-
-### Phase 6: Frontend Integration
-
-**Update `src/pages/Notifications.tsx`:**
-- Load/save preferences from database
-- Connect to `notification_preferences` table
-
-**New hook `src/hooks/useNotificationPreferences.ts`:**
-- CRUD operations for preferences
-
-**New hook `src/hooks/usePushSubscription.ts`:**
-- Subscribe/unsubscribe push notifications
-- Request permission
-
----
-
-### Phase 7: Integration Triggers
-
-**Update existing code to trigger emails:**
-
-| Event | Email To | Push To |
-|-------|----------|---------|
-| User signup | Customer (Welcome) | - |
-| Booking created | Customer + Owner | Owner |
-| Booking completed | Customer | Customer |
-| Booking cancelled | Customer + Owner | Both |
-| Payment received | Customer | Customer |
-| Salon frozen | Owner | Owner |
-| Salon unfrozen | Owner | Owner |
-
----
-
-## 📁 New Files to Create
-
-| File | Purpose |
-|------|---------|
-| `src/lib/email-templates.ts` | 13 HTML email templates |
-| `supabase/functions/send-email/index.ts` | SMTP email sender |
-| `supabase/functions/send-push/index.ts` | Web Push sender |
-| `supabase/functions/booking-reminders/index.ts` | Cron: 24h reminders |
-| `supabase/functions/daily-summary/index.ts` | Cron: daily reports |
-| `src/hooks/useNotificationPreferences.ts` | Preferences hook |
-| `src/hooks/usePushSubscription.ts` | Push subscription hook |
-
-## 📁 Files to Modify
-
-| File | Changes |
-|------|---------|
-| `src/pages/Notifications.tsx` | Database integration |
-| `src/hooks/useData.ts` | Trigger emails on booking |
-| `supabase/config.toml` | Add cron schedules |
-
----
-
-## ⚙️ SMTP Setup (Admin Dashboard වලින් කරන්න)
-
-Admin Dashboard → Email tab:
-1. SMTP Host: `mail.salonbooking.lk` (or your provider)
-2. SMTP Port: `587`
-3. SMTP Username: `noreply@salonbooking.lk`
-4. SMTP Password: `[your password]`
-5. From Email: `noreply@salonbooking.lk`
-6. From Name: `SalonBooking.lk`
-
-**API key ඕනෑ නෑ** - Admin dashboard එකෙන් SMTP configure කරනවා!
-
----
-
-## 🎨 Email Template Preview
-
-```text
-╔═══════════════════════════════════════════════════════════╗
-║                    SALONBOOKING.LK                         ║
-║            ✨ Your Beauty Destination ✨                    ║
-╚═══════════════════════════════════════════════════════════╝
-
-┌───────────────────────────────────────────────────────────┐
-│                                                           │
-│              ✅ BOOKING CONFIRMED!                        │
-│                                                           │
-│  Hi [Customer Name],                                      │
-│                                                           │
-│  Your appointment is confirmed!                           │
-│                                                           │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │  📍 Glamour Beauty Salon                            │ │
-│  │  ✂️ Haircut & Styling                               │ │
-│  │  👤 Nimal Perera                                    │ │
-│  │  📅 Feb 10, 2024 at 2:00 PM                         │ │
-│  │  💰 Rs. 2,500                                       │ │
-│  └─────────────────────────────────────────────────────┘ │
-│                                                           │
-│        [📱 ADD TO CALENDAR]  [🗺️ GET DIRECTIONS]         │
-│                                                           │
-└───────────────────────────────────────────────────────────┘
-
-────────────────────────────────────────────────────────────
-© 2024 SalonBooking.lk | Colombo, Sri Lanka
-Unsubscribe | Privacy Policy
-```
-
----
-
-## Technical Notes
-
-1. **SMTP Library**: `denomailer` (already used in send-reset-code)
-2. **Push Notifications**: Web Push API with VAPID keys
-3. **Cron Jobs**: Edge function scheduling via config.toml
-4. **Preference Checking**: Always check user preferences before sending
+| Action | File | Purpose |
+|---|---|---|
+| Create | `public/sw-push.js` | Service worker push event handler |
+| Create | `supabase/functions/send-push/index.ts` | Edge function to send push via Web Push API |
+| Create | `src/hooks/usePushSubscription.ts` | Browser push subscribe/unsubscribe |
+| Create | `src/hooks/useNotificationPreferences.ts` | DB preferences CRUD |
+| Modify | `src/pages/Notifications.tsx` | Connect to DB, add push subscribe UI |
+| Modify | `vite.config.ts` | Import custom SW for push |
 
