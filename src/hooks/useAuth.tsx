@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 type UserRole = 'customer' | 'vendor' | 'admin';
 
 // Rate limiting constants
-const MAX_LOGIN_ATTEMPTS = 5;
+const MAX_LOGIN_ATTEMPTS = 10;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 const RATE_LIMIT_KEY = 'auth_rate_limit';
 
