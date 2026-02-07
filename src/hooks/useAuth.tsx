@@ -6,6 +6,75 @@ import { toast } from 'sonner';
 
 type UserRole = 'customer' | 'vendor' | 'admin';
 
+// Rate limiting constants
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+const RATE_LIMIT_KEY = 'auth_rate_limit';
+
+interface RateLimitData {
+  attempts: number;
+  firstAttemptAt: number;
+  lockedUntil: number | null;
+}
+
+const getRateLimitData = (): RateLimitData => {
+  try {
+    const raw = sessionStorage.getItem(RATE_LIMIT_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return { attempts: 0, firstAttemptAt: 0, lockedUntil: null };
+};
+
+const setRateLimitData = (data: RateLimitData) => {
+  sessionStorage.setItem(RATE_LIMIT_KEY, JSON.stringify(data));
+};
+
+const checkRateLimit = (): { allowed: boolean; remainingSeconds?: number } => {
+  const data = getRateLimitData();
+  const now = Date.now();
+
+  // Check if locked out
+  if (data.lockedUntil && now < data.lockedUntil) {
+    return { allowed: false, remainingSeconds: Math.ceil((data.lockedUntil - now) / 1000) };
+  }
+
+  // Reset if lockout expired or window passed
+  if (data.lockedUntil && now >= data.lockedUntil) {
+    setRateLimitData({ attempts: 0, firstAttemptAt: 0, lockedUntil: null });
+    return { allowed: true };
+  }
+
+  // Reset window if first attempt was more than lockout duration ago
+  if (data.firstAttemptAt && now - data.firstAttemptAt > LOCKOUT_DURATION_MS) {
+    setRateLimitData({ attempts: 0, firstAttemptAt: 0, lockedUntil: null });
+    return { allowed: true };
+  }
+
+  return { allowed: true };
+};
+
+const recordFailedAttempt = () => {
+  const data = getRateLimitData();
+  const now = Date.now();
+
+  const newData: RateLimitData = {
+    attempts: data.attempts + 1,
+    firstAttemptAt: data.firstAttemptAt || now,
+    lockedUntil: null,
+  };
+
+  if (newData.attempts >= MAX_LOGIN_ATTEMPTS) {
+    newData.lockedUntil = now + LOCKOUT_DURATION_MS;
+  }
+
+  setRateLimitData(newData);
+  return newData;
+};
+
+const resetRateLimit = () => {
+  sessionStorage.removeItem(RATE_LIMIT_KEY);
+};
+
 interface AuthContextType {
   user: User | null;
   session: Session | null;
@@ -78,7 +147,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setUser(session?.user ?? null);
         
         if (session?.user) {
-          // Fire and forget - don't block loading state
           Promise.all([
             fetchProfile(session.user.id),
             fetchRoles(session.user.id)
@@ -121,11 +189,29 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const signIn = async (email: string, password: string) => {
+    // Check rate limit before attempting
+    const rateCheck = checkRateLimit();
+    if (!rateCheck.allowed) {
+      const minutes = Math.ceil((rateCheck.remainingSeconds || 0) / 60);
+      const errorMsg = `Too many login attempts. Please try again in ${minutes} minute${minutes > 1 ? 's' : ''}.`;
+      toast.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
-      toast.error(error.message);
+      const result = recordFailedAttempt();
+      if (result.lockedUntil) {
+        toast.error(`Account locked for 15 minutes due to too many failed attempts.`);
+      } else {
+        const remaining = MAX_LOGIN_ATTEMPTS - result.attempts;
+        toast.error(`${error.message} (${remaining} attempt${remaining !== 1 ? 's' : ''} remaining)`);
+      }
       throw error;
     }
+    
+    // Reset rate limit on successful login
+    resetRateLimit();
     toast.success('Welcome back!');
   };
 
@@ -143,7 +229,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       throw error;
     }
 
-    // Create profile after signup
     if (data.user) {
       const { error: profileError } = await supabase.from('profiles').insert({
         user_id: data.user.id,
@@ -154,7 +239,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         console.error('Error creating profile:', profileError);
       }
 
-      // Assign default customer role
       const { error: roleError } = await supabase.from('user_roles').insert({
         user_id: data.user.id,
         role: 'customer',

@@ -17,23 +17,32 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Verify auth
+    // Verify JWT using getClaims
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      throw new Error("No authorization header");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
-    const { data: { user }, error: authError } = await createClient(
-      supabaseUrl,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    ).auth.getUser();
+    const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await anonClient.auth.getClaims(token);
 
-    if (authError || !user) {
-      throw new Error("Unauthorized");
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
+
+    const userId = claimsData.claims.sub as string;
 
     const { payment_id, invoice_id } = await req.json();
 
@@ -41,11 +50,8 @@ serve(async (req) => {
       throw new Error("Either payment_id or invoice_id is required");
     }
 
-    // First check our database for the payment record
-    let query = supabase
-      .from("crypto_payments")
-      .select("*")
-      .eq("user_id", user.id);
+    // Check our database - scoped to authenticated user
+    let query = supabase.from("crypto_payments").select("*").eq("user_id", userId);
 
     if (payment_id) {
       query = query.eq("id", payment_id);
@@ -59,7 +65,7 @@ serve(async (req) => {
       throw new Error("Payment not found");
     }
 
-    // If already confirmed or failed, return cached status
+    // If already in terminal state, return cached
     if (["confirmed", "finished", "failed", "expired", "refunded"].includes(cryptoPayment.status)) {
       return new Response(
         JSON.stringify({
@@ -77,11 +83,7 @@ serve(async (req) => {
 
     // Check expiration
     if (cryptoPayment.expires_at && new Date(cryptoPayment.expires_at) < new Date()) {
-      // Update status to expired
-      await supabase
-        .from("crypto_payments")
-        .update({ status: "expired" })
-        .eq("id", cryptoPayment.id);
+      await supabase.from("crypto_payments").update({ status: "expired" }).eq("id", cryptoPayment.id);
 
       return new Response(
         JSON.stringify({
@@ -95,7 +97,7 @@ serve(async (req) => {
       );
     }
 
-    // Get NOWPayments settings for API call
+    // Get NOWPayments settings
     const { data: settings } = await supabase
       .from("system_settings")
       .select("key, value")
@@ -108,7 +110,6 @@ serve(async (req) => {
 
     const apiKey = settingsMap["nowpayments_api_key"];
     if (!apiKey) {
-      // Return cached status if API key not available
       return new Response(
         JSON.stringify({
           success: true,
@@ -124,54 +125,35 @@ serve(async (req) => {
     const isSandbox = settingsMap["nowpayments_sandbox"] === "true";
     const baseUrl = isSandbox ? NOWPAYMENTS_SANDBOX_URL : NOWPAYMENTS_API_URL;
 
-    // Check payment status from NOWPayments API
-    const statusResponse = await fetch(
-      `${baseUrl}/payment/${cryptoPayment.invoice_id}`,
-      {
-        headers: { "x-api-key": apiKey },
-      }
-    );
+    const statusResponse = await fetch(`${baseUrl}/payment/${cryptoPayment.invoice_id}`, {
+      headers: { "x-api-key": apiKey },
+    });
 
     if (statusResponse.ok) {
       const statusData = await statusResponse.json();
-      
-      // Map NOWPayments status to our status
+
       let newStatus = cryptoPayment.status;
       if (statusData.payment_status) {
         const npStatus = statusData.payment_status.toLowerCase();
-        if (npStatus === "finished" || npStatus === "confirmed") {
-          newStatus = "confirmed";
-        } else if (npStatus === "waiting" || npStatus === "pending") {
-          newStatus = "waiting";
-        } else if (npStatus === "confirming" || npStatus === "sending") {
-          newStatus = "confirming";
-        } else if (npStatus === "partially_paid") {
-          newStatus = "partially_paid";
-        } else if (npStatus === "expired") {
-          newStatus = "expired";
-        } else if (npStatus === "failed") {
-          newStatus = "failed";
-        } else if (npStatus === "refunded") {
-          newStatus = "refunded";
-        }
+        if (npStatus === "finished" || npStatus === "confirmed") newStatus = "confirmed";
+        else if (npStatus === "waiting" || npStatus === "pending") newStatus = "waiting";
+        else if (npStatus === "confirming" || npStatus === "sending") newStatus = "confirming";
+        else if (npStatus === "partially_paid") newStatus = "partially_paid";
+        else if (npStatus === "expired") newStatus = "expired";
+        else if (npStatus === "failed") newStatus = "failed";
+        else if (npStatus === "refunded") newStatus = "refunded";
       }
 
-      // Update our database if status changed
       if (newStatus !== cryptoPayment.status) {
         const updateData: Record<string, unknown> = {
           status: newStatus,
           actually_paid: statusData.actually_paid,
           payment_id: statusData.payment_id?.toString(),
         };
-
         if (newStatus === "confirmed" || newStatus === "finished") {
           updateData.paid_at = new Date().toISOString();
         }
-
-        await supabase
-          .from("crypto_payments")
-          .update(updateData)
-          .eq("id", cryptoPayment.id);
+        await supabase.from("crypto_payments").update(updateData).eq("id", cryptoPayment.id);
       }
 
       return new Response(
@@ -188,7 +170,6 @@ serve(async (req) => {
       );
     }
 
-    // Return cached status if API call fails
     return new Response(
       JSON.stringify({
         success: true,
@@ -206,10 +187,7 @@ serve(async (req) => {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
       }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 400,
-      }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
     );
   }
 });

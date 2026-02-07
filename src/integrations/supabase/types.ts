@@ -119,6 +119,13 @@ export type Database = {
             foreignKeyName: "bookings_salon_id_fkey"
             columns: ["salon_id"]
             isOneToOne: false
+            referencedRelation: "public_salons"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "bookings_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
             referencedRelation: "salons"
             referencedColumns: ["id"]
           },
@@ -178,6 +185,13 @@ export type Database = {
             columns: ["booking_id"]
             isOneToOne: false
             referencedRelation: "bookings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "commission_settlements_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
+            referencedRelation: "public_salons"
             referencedColumns: ["id"]
           },
           {
@@ -466,6 +480,13 @@ export type Database = {
             foreignKeyName: "payout_requests_salon_id_fkey"
             columns: ["salon_id"]
             isOneToOne: false
+            referencedRelation: "public_salons"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payout_requests_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
             referencedRelation: "salons"
             referencedColumns: ["id"]
           },
@@ -638,6 +659,13 @@ export type Database = {
             foreignKeyName: "reviews_salon_id_fkey"
             columns: ["salon_id"]
             isOneToOne: false
+            referencedRelation: "public_salons"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reviews_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
             referencedRelation: "salons"
             referencedColumns: ["id"]
           },
@@ -666,6 +694,13 @@ export type Database = {
           salon_id?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "salon_images_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
+            referencedRelation: "public_salons"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "salon_images_salon_id_fkey"
             columns: ["salon_id"]
@@ -869,6 +904,13 @@ export type Database = {
             foreignKeyName: "services_salon_id_fkey"
             columns: ["salon_id"]
             isOneToOne: false
+            referencedRelation: "public_salons"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "services_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
             referencedRelation: "salons"
             referencedColumns: ["id"]
           },
@@ -912,6 +954,13 @@ export type Database = {
           user_id?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "staff_salon_id_fkey"
+            columns: ["salon_id"]
+            isOneToOne: false
+            referencedRelation: "public_salons"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "staff_salon_id_fkey"
             columns: ["salon_id"]
@@ -1079,6 +1128,13 @@ export type Database = {
             columns: ["related_booking_id"]
             isOneToOne: false
             referencedRelation: "bookings"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "support_tickets_related_salon_id_fkey"
+            columns: ["related_salon_id"]
+            isOneToOne: false
+            referencedRelation: "public_salons"
             referencedColumns: ["id"]
           },
           {
@@ -1290,7 +1346,121 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      public_profiles: {
+        Row: {
+          avatar_url: string | null
+          full_name: string | null
+          id: string | null
+          user_id: string | null
+        }
+        Insert: {
+          avatar_url?: string | null
+          full_name?: string | null
+          id?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          avatar_url?: string | null
+          full_name?: string | null
+          id?: string | null
+          user_id?: string | null
+        }
+        Relationships: []
+      }
+      public_salons: {
+        Row: {
+          address: string | null
+          city: string | null
+          cover_image: string | null
+          created_at: string | null
+          description: string | null
+          district_id: string | null
+          email: string | null
+          id: string | null
+          latitude: number | null
+          logo: string | null
+          longitude: number | null
+          name: string | null
+          owner_id: string | null
+          phone: string | null
+          province_id: string | null
+          rating: number | null
+          review_count: number | null
+          slug: string | null
+          status: Database["public"]["Enums"]["salon_status"] | null
+          town_id: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          address?: string | null
+          city?: string | null
+          cover_image?: string | null
+          created_at?: string | null
+          description?: string | null
+          district_id?: string | null
+          email?: string | null
+          id?: string | null
+          latitude?: number | null
+          logo?: string | null
+          longitude?: number | null
+          name?: string | null
+          owner_id?: string | null
+          phone?: string | null
+          province_id?: string | null
+          rating?: number | null
+          review_count?: number | null
+          slug?: string | null
+          status?: Database["public"]["Enums"]["salon_status"] | null
+          town_id?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          address?: string | null
+          city?: string | null
+          cover_image?: string | null
+          created_at?: string | null
+          description?: string | null
+          district_id?: string | null
+          email?: string | null
+          id?: string | null
+          latitude?: number | null
+          logo?: string | null
+          longitude?: number | null
+          name?: string | null
+          owner_id?: string | null
+          phone?: string | null
+          province_id?: string | null
+          rating?: number | null
+          review_count?: number | null
+          slug?: string | null
+          status?: Database["public"]["Enums"]["salon_status"] | null
+          town_id?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "salons_district_id_fkey"
+            columns: ["district_id"]
+            isOneToOne: false
+            referencedRelation: "districts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "salons_province_id_fkey"
+            columns: ["province_id"]
+            isOneToOne: false
+            referencedRelation: "provinces"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "salons_town_id_fkey"
+            columns: ["town_id"]
+            isOneToOne: false
+            referencedRelation: "towns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
       has_role: {
