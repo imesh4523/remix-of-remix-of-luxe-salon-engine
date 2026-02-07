@@ -1,107 +1,158 @@
 
 
-# Push Notification System - Full Implementation
+# Maximum Security Hardening Plan
 
-## Current Status
+Site එකට ගොඩක් users එනවා නම් security එක 100% important. Security scan එකෙන් **critical vulnerabilities 4ක්** සහ **warnings 4ක්** හම්බ වුණා. මේ plan එකෙන් ඒ හැම එකක්ම fix කරනවා + extra protection layers add කරනවා.
 
-**Already done:**
-- `push_subscriptions` table exists with RLS policies (endpoint, p256dh_key, auth_key, device_info, is_active)
-- `notification_preferences` table has push columns: `push_enabled`, `push_booking_updates`, `push_reminders`, `push_payment_updates`
-- PWA setup with `vite-plugin-pwa` (service worker via Workbox)
-- `send-email` edge function already working
+---
 
-**Not yet built:**
-- `send-push` edge function
-- `usePushSubscription` hook (subscribe/unsubscribe)
-- `useNotificationPreferences` hook (load/save from DB)
-- Notifications.tsx database integration
-- Service worker push event listener
+## Critical Issues Found (RED - Must Fix)
+
+1. **Profiles table එකේ personal data (phone, IP, name) කාටත් පේනවා** - hacker කෙනෙකුට users ගේ phone numbers scrape කරන්න පුළුවන්
+2. **Salons table එකේ financial data (commission rates, credit limits) expose වෙනවා** - competitors ට business secrets බලන්න පුළුවන්
+3. **Email logs table එකේ email addresses leak වෙනවා** - spam attacks වලට use කරන්න පුළුවන්
+4. **Payout requests table එකේ bank details expose වෙනවා** - financial fraud risk
 
 ---
 
 ## Implementation Steps
 
-### Step 1: Service Worker Push Handler
-Add a custom service worker file that listens for `push` events and shows native notifications. The PWA plugin will inject this alongside the existing Workbox service worker.
+### Step 1: Profiles Table - Lock Down Personal Data
+Current policy: `USING condition: true` (කාටත් බලන්න පුළුවන්!)
 
-**New file:** `public/sw-push.js`
-- Listen for `push` event, parse payload, show notification with title/body/icon/URL
-- Listen for `notificationclick` to open the app at the right page
+Fix: Users ට own profile එක + basic public info (name, avatar) only බලන්න දෙනවා. Phone, IP, suspension details hide කරනවා.
 
-### Step 2: Update PWA Config
-Modify `vite.config.ts` to import the custom push service worker alongside the auto-generated Workbox one using `importScripts`.
+- Drop "Users can view all profiles" policy
+- Create new policy: authenticated users can see own full profile
+- Create new policy: public can only see id, full_name, avatar_url via a database view
 
-### Step 3: Send Push Edge Function
-**New file:** `supabase/functions/send-push/index.ts`
+### Step 2: Salons Table - Hide Financial Columns
+Current policy: Anyone can view approved salons (including commission_rate, credit_limit, platform_payable, trust_level)
 
-- Accept: `{ userId, title, body, url, data }`
-- Fetch user's `notification_preferences` to check if push is enabled
-- Fetch all active `push_subscriptions` for that user
-- Use the Web Push protocol (with VAPID keys stored as secrets) to send to each subscription endpoint
-- Remove invalid subscriptions (410 Gone responses)
-- Support batch sending (to multiple users)
+Fix: Create a `public_salons` view that exposes only public columns (name, description, address, city, rating, review_count, cover_image, logo, slug, phone, email, latitude, longitude). Financial columns hidden.
 
-**Required secrets:** `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (email)
+### Step 3: Email Logs - Restrict Access
+Fix: Ensure users can ONLY see their own email logs. Remove the ability for arbitrary authenticated users to insert logs (only service_role should insert).
 
-### Step 4: Push Subscription Hook
-**New file:** `src/hooks/usePushSubscription.ts`
+### Step 4: Payout Requests - Restrict Bank Details
+Fix: Bank details should only be visible to the specific wallet owner and admins, not all salon staff.
 
-- `subscribeToPush()`: Request notification permission, get PushSubscription from service worker, save endpoint + keys to `push_subscriptions` table
-- `unsubscribeFromPush()`: Unsubscribe from browser + deactivate in DB
-- `isSubscribed`: Check if current device has active subscription
-- Uses the VAPID public key (exposed via env variable `VITE_VAPID_PUBLIC_KEY`)
+### Step 5: Reviews - Hide Hidden Reviews
+Fix: Update "Anyone can view reviews" policy to filter out `is_hidden = true` reviews from public view.
 
-### Step 5: Notification Preferences Hook
-**New file:** `src/hooks/useNotificationPreferences.ts`
+### Step 6: Password Reset Codes - Add Policies
+Fix: This table has RLS enabled but NO policies. Add appropriate policies so the password reset flow works via service_role only.
 
-- Load preferences from `notification_preferences` table for current user
-- Update individual preference toggles
-- Auto-create default preferences if none exist
+### Step 7: Activity Logs - Validate User ID on Insert
+Fix: Ensure users can only insert logs with their own user_id, preventing impersonation.
 
-### Step 6: Update Notifications Page
-**Modify:** `src/pages/Notifications.tsx`
+### Step 8: Edge Functions - Add JWT Verification
+Current `config.toml` has NO `verify_jwt` settings. All edge functions are potentially open.
 
-- Replace local `useState` with `useNotificationPreferences` hook
-- Map toggles to actual DB columns (email_booking_confirm, push_enabled, etc.)
-- Add push subscribe/unsubscribe button using `usePushSubscription`
-- Show permission status (granted/denied/default)
-- More granular controls matching DB columns
+Fix: Add `verify_jwt = false` to config.toml for each function and implement manual JWT verification using `getClaims()` in the edge functions that need auth protection (send-push, create-crypto-invoice, check-crypto-payment, get-route-info). Keep webhook functions (nowpayments-webhook) public but validate signatures.
+
+### Step 9: Rate Limiting on Auth
+Add client-side rate limiting on login attempts to prevent brute force attacks.
 
 ---
 
 ## Technical Details
 
-### VAPID Keys
-Web Push requires VAPID (Voluntary Application Server Identification) keys. These need to be generated once and stored as secrets:
-- `VAPID_PUBLIC_KEY` - shared with frontend (also add as `VITE_VAPID_PUBLIC_KEY` in .env)
-- `VAPID_PRIVATE_KEY` - only in edge function secrets
-- `VAPID_SUBJECT` - mailto: URL like `mailto:noreply@salonbooking.lk`
+### Database Migration SQL (Step 1-7)
 
-### Push Payload Format
 ```text
-{
-  "title": "Booking Confirmed",
-  "body": "Your appointment at Glamour Salon is confirmed for Feb 10 at 2:00 PM",
-  "icon": "/pwa-192x192.png",
-  "url": "/bookings"
-}
+-- Step 1: Fix profiles access
+DROP POLICY "Users can view all profiles" ON profiles;
+
+CREATE POLICY "Users can view own profile"
+  ON profiles FOR SELECT
+  USING (auth.uid() = user_id OR has_role(auth.uid(), 'admin'));
+
+-- Create a public view for minimal profile info (for showing names in reviews etc.)
+CREATE VIEW public_profiles AS
+  SELECT id, user_id, full_name, avatar_url
+  FROM profiles;
+
+-- Step 2: Create public salons view (hide financial data)
+CREATE VIEW public_salons AS
+  SELECT id, name, description, address, city, phone, email, 
+         cover_image, logo, slug, rating, review_count, 
+         latitude, longitude, status, province_id, district_id, town_id, owner_id
+  FROM salons
+  WHERE status = 'approved';
+
+-- Step 5: Fix reviews visibility
+DROP POLICY "Anyone can view reviews" ON reviews;
+
+CREATE POLICY "Anyone can view visible reviews"
+  ON reviews FOR SELECT
+  USING (
+    is_hidden = false 
+    OR customer_id = auth.uid() 
+    OR has_role(auth.uid(), 'admin')
+  );
+
+-- Step 6: Password reset codes - service role only
+CREATE POLICY "Service role manages reset codes"
+  ON password_reset_codes FOR ALL
+  USING (auth.role() = 'service_role');
+
+-- Step 7: Activity logs - validate user_id
+DROP POLICY "Authenticated users can insert logs" ON activity_logs;
+
+CREATE POLICY "Users can insert own logs"
+  ON activity_logs FOR INSERT
+  WITH CHECK (auth.uid() = user_id OR auth.role() = 'service_role');
 ```
 
-### Preference Check Map for Push
-| Push Preference Column | Triggers |
-|---|---|
-| push_booking_updates | booking_confirmed, booking_cancelled, new_booking_alert |
-| push_reminders | booking_reminder |
-| push_payment_updates | payment_received, payout_processed |
+### Edge Function Config (Step 8)
+Update `supabase/config.toml`:
+```text
+[functions.send-push]
+verify_jwt = false
 
-### Files Summary
+[functions.create-crypto-invoice]
+verify_jwt = false
+
+[functions.check-crypto-payment]
+verify_jwt = false
+
+[functions.get-route-info]
+verify_jwt = false
+
+[functions.send-email]
+verify_jwt = false
+
+[functions.send-reset-code]
+verify_jwt = false
+
+[functions.verify-reset-code]
+verify_jwt = false
+
+[functions.create-test-admin]
+verify_jwt = false
+
+[functions.nowpayments-webhook]
+verify_jwt = false
+```
+
+Then add `getClaims()` JWT validation to protected edge functions.
+
+### Client-Side Rate Limiting (Step 9)
+Add login attempt tracking with lockout after 5 failed attempts in 15 minutes.
+
+### Files to Modify/Create
 
 | Action | File | Purpose |
-|---|---|---|
-| Create | `public/sw-push.js` | Service worker push event handler |
-| Create | `supabase/functions/send-push/index.ts` | Edge function to send push via Web Push API |
-| Create | `src/hooks/usePushSubscription.ts` | Browser push subscribe/unsubscribe |
-| Create | `src/hooks/useNotificationPreferences.ts` | DB preferences CRUD |
-| Modify | `src/pages/Notifications.tsx` | Connect to DB, add push subscribe UI |
-| Modify | `vite.config.ts` | Import custom SW for push |
+|--------|------|---------|
+| Modify | Database migration | Fix 7 RLS policies |
+| Modify | supabase/config.toml | JWT verification settings |
+| Modify | supabase/functions/send-push/index.ts | Add getClaims() auth |
+| Modify | supabase/functions/create-crypto-invoice/index.ts | Add getClaims() auth |
+| Modify | supabase/functions/check-crypto-payment/index.ts | Add getClaims() auth |
+| Modify | supabase/functions/get-route-info/index.ts | Add getClaims() auth |
+| Modify | supabase/functions/send-email/index.ts | Add getClaims() auth |
+| Modify | src/pages/Auth.tsx | Add rate limiting |
+| Modify | src/hooks/useAuth.tsx | Add rate limiting logic |
+| Create | src/components/admin/SecurityDashboard.tsx | Security monitoring view (optional) |
 
