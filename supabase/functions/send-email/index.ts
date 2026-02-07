@@ -24,7 +24,6 @@ type EmailTemplateType =
   | "account_frozen"
   | "account_unfrozen";
 
-// Preference keys that map to template types
 const preferenceCheckMap: Record<string, string> = {
   booking_confirmed: "email_booking_confirm",
   booking_reminder: "email_booking_reminder",
@@ -43,9 +42,6 @@ interface SendEmailRequest {
   userId?: string;
   skipPreferenceCheck?: boolean;
 }
-
-// ============ INLINE TEMPLATES ============
-// (duplicated from frontend for edge function independence)
 
 const brandColors = {
   gold: "#D4A574",
@@ -133,7 +129,30 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // Verify JWT using getClaims
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await anonClient.auth.getClaims(token);
+
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     const { to, type, data, userId, skipPreferenceCheck }: SendEmailRequest = await req.json();
 
@@ -153,7 +172,6 @@ serve(async (req) => {
 
         if (prefs && prefs[prefKey] === false) {
           console.log(`User ${userId} has disabled ${prefKey}, skipping email`);
-          // Log as skipped
           await supabase.from("email_logs").insert({
             recipient_email: to,
             template_type: type,
@@ -170,10 +188,8 @@ serve(async (req) => {
       }
     }
 
-    // Generate email from template
     const { subject, html } = generateTemplate(type, data);
 
-    // Get SMTP settings from system_settings
     const { data: settings } = await supabase
       .from("system_settings")
       .select("key, value")
@@ -193,7 +209,6 @@ serve(async (req) => {
     const fromName = settingsMap["smtp_from_name"] || "SalonBooking.lk";
     const useSecure = settingsMap["smtp_secure"] === "true";
 
-    // Log the email attempt
     const { data: logEntry } = await supabase.from("email_logs").insert({
       recipient_email: to,
       template_type: type,
@@ -217,7 +232,6 @@ serve(async (req) => {
       );
     }
 
-    // Send via SMTP
     const client = new SMTPClient({
       connection: {
         hostname: smtpHost,
@@ -237,7 +251,6 @@ serve(async (req) => {
 
     await client.close();
 
-    // Update log as sent
     if (logEntry) {
       await supabase.from("email_logs").update({
         status: "sent",

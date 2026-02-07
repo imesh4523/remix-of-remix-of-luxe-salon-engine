@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -14,21 +15,20 @@ interface RouteRequest {
 
 interface RouteGeometry {
   type: 'LineString';
-  coordinates: [number, number][]; // [lng, lat] pairs
+  coordinates: [number, number][];
 }
 
 interface RouteResponse {
-  distance: number; // meters
-  duration: number; // seconds
+  distance: number;
+  duration: number;
   durationMinutes: number;
   distanceKm: number;
   source: 'osrm' | 'fallback';
-  geometry?: RouteGeometry; // Route path coordinates
+  geometry?: RouteGeometry;
 }
 
-// Haversine formula for fallback straight-line distance
 const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-  const R = 6371; // Earth's radius in km
+  const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
@@ -41,22 +41,44 @@ const haversineDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 };
 
-// Estimate duration from straight-line distance (30 km/h average in urban Sri Lanka)
 const estimateDuration = (distanceKm: number): number => {
   const averageSpeedKmh = 30;
-  return (distanceKm / averageSpeedKmh) * 60; // minutes
+  return (distanceKm / averageSpeedKmh) * 60;
 };
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
+    // Verify JWT using getClaims
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await anonClient.auth.getClaims(token);
+
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const { originLat, originLng, destLat, destLng }: RouteRequest = await req.json();
 
-    // Validate coordinates
     if (!originLat || !originLng || !destLat || !destLng) {
       return new Response(
         JSON.stringify({ error: 'Missing coordinates' }),
@@ -64,17 +86,13 @@ serve(async (req) => {
       );
     }
 
-    // Call OSRM public API with full geometry
-    // Note: OSRM uses longitude,latitude order
     const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?overview=full&geometries=geojson`;
     
     console.log('Calling OSRM:', osrmUrl);
 
     const osrmResponse = await fetch(osrmUrl, {
       method: 'GET',
-      headers: {
-        'User-Agent': 'GlamBook/1.0',
-      },
+      headers: { 'User-Agent': 'GlamBook/1.0' },
     });
 
     if (!osrmResponse.ok) {
@@ -87,31 +105,24 @@ serve(async (req) => {
     if (osrmData.code === 'Ok' && osrmData.routes && osrmData.routes.length > 0) {
       const route = osrmData.routes[0];
       const response: RouteResponse = {
-        distance: route.distance, // meters
-        duration: route.duration, // seconds
+        distance: route.distance,
+        duration: route.duration,
         durationMinutes: Math.round(route.duration / 60),
         distanceKm: route.distance / 1000,
         source: 'osrm',
-        geometry: route.geometry, // GeoJSON LineString with coordinates
+        geometry: route.geometry,
       };
-
-      console.log('OSRM response with geometry:', {
-        ...response,
-        geometryPointCount: response.geometry?.coordinates?.length || 0,
-      });
 
       return new Response(
         JSON.stringify(response),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     } else {
-      console.error('OSRM no route found:', osrmData);
       throw new Error('No route found');
     }
   } catch (error) {
     console.error('Route calculation error, using fallback:', error);
 
-    // Fallback to straight-line calculation
     try {
       const { originLat, originLng, destLat, destLng }: RouteRequest = await req.clone().json();
       
@@ -119,8 +130,8 @@ serve(async (req) => {
       const durationMinutes = estimateDuration(distanceKm);
 
       const response: RouteResponse = {
-        distance: distanceKm * 1000, // meters
-        duration: durationMinutes * 60, // seconds
+        distance: distanceKm * 1000,
+        duration: durationMinutes * 60,
         durationMinutes: Math.round(durationMinutes),
         distanceKm: distanceKm,
         source: 'fallback',

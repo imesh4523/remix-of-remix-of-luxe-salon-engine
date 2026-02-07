@@ -52,7 +52,7 @@ async function createVapidJwt(
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     aud: audience,
-    exp: now + 12 * 60 * 60, // 12 hours
+    exp: now + 12 * 60 * 60,
     sub: subject,
   };
 
@@ -86,8 +86,6 @@ async function sendWebPush(
   vapidPrivateKey: string,
   vapidSubject: string
 ): Promise<Response> {
-  // For Web Push, we need to encrypt the payload and send with VAPID auth
-  // Using the simpler fetch-based approach with VAPID authorization
   const endpoint = new URL(subscription.endpoint);
   const audience = `${endpoint.protocol}//${endpoint.host}`;
 
@@ -126,6 +124,30 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+
+    // Auth check: require valid JWT (admin or service_role)
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await anonClient.auth.getClaims(token);
+
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY");
     const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY");
     const vapidSubject = Deno.env.get("VAPID_SUBJECT") || "mailto:noreply@salonbooking.lk";
@@ -144,7 +166,6 @@ serve(async (req) => {
       throw new Error("Missing required fields: title, body");
     }
 
-    // Collect target user IDs
     const targetUserIds: string[] = [];
     if (userIds?.length) targetUserIds.push(...userIds);
     else if (userId) targetUserIds.push(userId);
@@ -153,7 +174,6 @@ serve(async (req) => {
     const results: { userId: string; sent: number; failed: number; skipped: boolean }[] = [];
 
     for (const uid of targetUserIds) {
-      // Check push preferences
       if (type) {
         const prefKey = pushPreferenceMap[type];
         if (prefKey) {
@@ -173,7 +193,6 @@ serve(async (req) => {
         }
       }
 
-      // Fetch active subscriptions for user
       const { data: subscriptions } = await supabase
         .from("push_subscriptions")
         .select("id, endpoint, p256dh_key, auth_key")
@@ -198,28 +217,14 @@ serve(async (req) => {
 
       for (const sub of subscriptions) {
         try {
-          const response = await sendWebPush(
-            sub,
-            payload,
-            vapidPublicKey,
-            vapidPrivateKey,
-            vapidSubject
-          );
+          const response = await sendWebPush(sub, payload, vapidPublicKey, vapidPrivateKey, vapidSubject);
 
           if (response.ok || response.status === 201) {
             sent++;
-            // Update last_used_at
-            await supabase
-              .from("push_subscriptions")
-              .update({ last_used_at: new Date().toISOString() })
-              .eq("id", sub.id);
+            await supabase.from("push_subscriptions").update({ last_used_at: new Date().toISOString() }).eq("id", sub.id);
           } else if (response.status === 410 || response.status === 404) {
-            // Subscription expired, deactivate
             console.log(`Subscription ${sub.id} expired, deactivating`);
-            await supabase
-              .from("push_subscriptions")
-              .update({ is_active: false })
-              .eq("id", sub.id);
+            await supabase.from("push_subscriptions").update({ is_active: false }).eq("id", sub.id);
             failed++;
           } else {
             console.error(`Push failed for ${sub.id}: ${response.status} ${await response.text()}`);

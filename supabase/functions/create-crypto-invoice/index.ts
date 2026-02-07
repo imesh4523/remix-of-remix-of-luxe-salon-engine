@@ -24,7 +24,6 @@ interface CreateInvoiceRequest {
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -32,23 +31,32 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Get auth user
+    // Verify JWT using getClaims
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      throw new Error("No authorization header");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
-    const { data: { user }, error: authError } = await createClient(
-      supabaseUrl,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    ).auth.getUser();
+    const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await anonClient.auth.getClaims(token);
 
-    if (authError || !user) {
-      throw new Error("Unauthorized");
+    if (claimsError || !claimsData?.claims) {
+      return new Response(
+        JSON.stringify({ error: "Unauthorized" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
+
+    const userId = claimsData.claims.sub as string;
 
     // Get NOWPayments settings from system_settings
     const { data: settings, error: settingsError } = await supabase
@@ -77,24 +85,15 @@ serve(async (req) => {
     const isSandbox = settingsMap["nowpayments_sandbox"] === "true";
     const baseUrl = isSandbox ? NOWPAYMENTS_SANDBOX_URL : NOWPAYMENTS_API_URL;
 
-    // Parse request body
     const body: CreateInvoiceRequest = await req.json();
-    const {
-      price_amount,
-      price_currency,
-      pay_currency,
-      order_id,
-      order_description,
-    } = body;
+    const { price_amount, price_currency, pay_currency, order_id, order_description } = body;
 
     if (!price_amount || !pay_currency || !order_id) {
       throw new Error("Missing required fields: price_amount, pay_currency, order_id");
     }
 
-    // Get the callback URL for IPN
     const ipnCallbackUrl = `${supabaseUrl}/functions/v1/nowpayments-webhook`;
 
-    // Create invoice with NOWPayments API
     const invoiceResponse = await fetch(`${baseUrl}/invoice`, {
       method: "POST",
       headers: {
@@ -121,11 +120,10 @@ serve(async (req) => {
     const invoiceData = await invoiceResponse.json();
     console.log("Invoice created:", invoiceData);
 
-    // Store crypto payment record in database
     const { data: cryptoPayment, error: insertError } = await supabase
       .from("crypto_payments")
       .insert({
-        user_id: user.id,
+        user_id: userId,
         invoice_id: invoiceData.id?.toString() || invoiceData.invoice_id?.toString(),
         order_id,
         pay_currency: pay_currency.toLowerCase(),
@@ -135,9 +133,9 @@ serve(async (req) => {
         price_currency: price_currency || "USD",
         status: "waiting",
         ipn_callback_url: ipnCallbackUrl,
-        expires_at: invoiceData.expiration_estimate_date 
+        expires_at: invoiceData.expiration_estimate_date
           ? new Date(invoiceData.expiration_estimate_date).toISOString()
-          : new Date(Date.now() + 20 * 60 * 1000).toISOString(), // 20 min default
+          : new Date(Date.now() + 20 * 60 * 1000).toISOString(),
       })
       .select()
       .single();
@@ -158,12 +156,9 @@ serve(async (req) => {
         price_amount,
         price_currency: price_currency || "USD",
         expires_at: cryptoPayment.expires_at,
-        invoice_url: invoiceData.invoice_url, // Optional redirect URL if needed
+        invoice_url: invoiceData.invoice_url,
       }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 200,
-      }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 200 }
     );
   } catch (error) {
     console.error("Error creating crypto invoice:", error);
@@ -172,10 +167,7 @@ serve(async (req) => {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
       }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-        status: 400,
-      }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
     );
   }
 });
